@@ -3,6 +3,7 @@ package command
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -29,6 +30,14 @@ type UiHook struct {
 	once      sync.Once
 	resources map[string]uiResourceState
 	ui        cli.Ui
+
+	// WaitGroup to signal when all stillApplying goruotines have returned.
+	// Used to synchronize tests.
+	wg sync.WaitGroup
+
+	// Context and CancelFunc used to cancel the stillApplying goroutine
+	ctx        context.Context
+	cancelFunc context.CancelFunc
 }
 
 // uiResourceState tracks the state of a single resource
@@ -38,7 +47,7 @@ type uiResourceState struct {
 	Op         uiResourceOp
 	Start      time.Time
 
-	DoneCh chan struct{} // To be used for cancellation
+	ctx context.Context // To be used for cancellation
 }
 
 // uiResourceOp is an enum for operations on a resource
@@ -50,6 +59,16 @@ const (
 	uiResourceModify
 	uiResourceDestroy
 )
+
+// wait for all stilApplying goroutines to return after cancellation.
+func (h *UiHook) wait() {
+	h.wg.Wait()
+}
+
+// cancel the stillApplying goroutine
+func (h *UiHook) Cancel() {
+	h.cancelFunc()
+}
 
 func (h *UiHook) PreApply(
 	n *terraform.InstanceInfo,
@@ -145,7 +164,7 @@ func (h *UiHook) PreApply(
 		ResourceId: stateId,
 		Op:         op,
 		Start:      time.Now().Round(time.Second),
-		DoneCh:     make(chan struct{}),
+		ctx:        h.ctx,
 	}
 
 	h.l.Lock()
@@ -153,15 +172,17 @@ func (h *UiHook) PreApply(
 	h.l.Unlock()
 
 	// Start goroutine that shows progress
+	h.wg.Add(1)
 	go h.stillApplying(uiState)
 
 	return terraform.HookActionContinue, nil
 }
 
 func (h *UiHook) stillApplying(state uiResourceState) {
+	defer h.wg.Done()
 	for {
 		select {
-		case <-state.DoneCh:
+		case <-state.ctx.Done():
 			return
 
 		case <-time.After(h.PeriodicUiTimer):
@@ -204,9 +225,7 @@ func (h *UiHook) PostApply(
 
 	h.l.Lock()
 	state := h.resources[id]
-	if state.DoneCh != nil {
-		close(state.DoneCh)
-	}
+	h.Cancel()
 
 	delete(h.resources, id)
 	h.l.Unlock()
@@ -336,6 +355,8 @@ func (h *UiHook) init() {
 	}
 
 	h.resources = make(map[string]uiResourceState)
+
+	h.ctx, h.cancelFunc = context.WithCancel(context.Background())
 
 	// Wrap the ui so that it is safe for concurrency regardless of the
 	// underlying reader/writer that is in place.

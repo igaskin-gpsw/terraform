@@ -64,6 +64,8 @@ func TestUiHookPreApply_periodicTimer(t *testing.T) {
 	}
 
 	time.Sleep(3100 * time.Millisecond)
+	h.Cancel()
+	h.wait()
 
 	expectedOutput := `data.aws_availability_zones.available: Destroying... (ID: 2017-03-0...0000 UTC)
 data.aws_availability_zones.available: Still destroying... (ID: 2017-03-0...0000 UTC, 1s elapsed)
